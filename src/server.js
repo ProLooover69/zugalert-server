@@ -1,7 +1,15 @@
+const Sentry = require('@sentry/node');
+require('dotenv').config();
+
+// Initialize Sentry (looks for SENTRY_DSN in env)
+Sentry.init({
+  dsn: process.env.SENTRY_DSN,
+  tracesSampleRate: 1.0,
+});
+
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
-require('dotenv').config();
 const connectDB = require('./db');
 
 // Connect to Database
@@ -135,12 +143,21 @@ app.get('/api/trains/disruptions/:stationId', async (req, res) => {
   }
 });
 
+// Sentry Debug Endpoint
+app.get('/debug-sentry', (req, res) => {
+  throw new Error('Sentry Test Error from ZugAlert Backend!');
+});
+
 // Fallback 404
 app.use((req, res) => {
   res.status(404).json({ error: 'Endpoint not found' });
 });
 
 // ============ ERROR HANDLING ============
+
+// Sentry Error Handler (must be registered before custom error handlers)
+Sentry.setupExpressErrorHandler(app);
+
 app.use((err, req, res, next) => {
   console.error('Server Error:', err.message);
   res.status(500).json({ error: 'Internal Server Error' });
