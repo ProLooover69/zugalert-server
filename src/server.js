@@ -2,6 +2,10 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 require('dotenv').config();
+const connectDB = require('./db');
+
+// Connect to Database
+connectDB();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -14,8 +18,16 @@ app.use(express.json());
 // Services
 const hafas = require('./api/hafas.js');
 const cache = require('./services/cache.js');
+const authRouter = require('./routes/auth.js');
+const userRouter = require('./routes/users.js');
 
 // ============ ROUTES ============
+
+// Auth Routes
+app.use('/api/auth', authRouter);
+
+// User Routes
+app.use('/api/users', userRouter);
 
 // Health Check
 app.get('/health', (req, res) => {
