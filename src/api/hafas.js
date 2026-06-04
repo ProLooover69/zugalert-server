@@ -4,9 +4,14 @@
 // Form, die das Frontend erwartet (journeys[].legs[], stopovers[], line.name, delay in Sek.).
 const { createClient } = require('db-vendo-client');
 
-let dbProfile = require('db-vendo-client/p/db');
+// Profil per Env-Var wählbar. Default 'dbnav' (DB-Navigator-API) – das robusteste, das
+// auch die offiziellen db-vendo-client-Images nutzen. 'db' bezieht zusätzlich die
+// regio-guide-RIS-API ein, die von Cloud-IPs oft mit 403/Forbidden antwortet.
+const PROFILE = process.env.DB_PROFILE || 'dbnav';
+let dbProfile = require(`db-vendo-client/p/${PROFILE}`);
 if (dbProfile && dbProfile.profile) dbProfile = dbProfile.profile;
 
+console.log(`🚉 HAFAS-Datenquelle: db-vendo-client (Profil '${PROFILE}')`);
 const client = createClient(
   dbProfile,
   process.env.DB_USER_AGENT || 'zugalert-backend (github.com/ProLooover69/zugalert-server)'
