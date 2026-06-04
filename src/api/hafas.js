@@ -1,230 +1,82 @@
-const { createClient } = require('hafas-client');
+const axios = require('axios');
 
-// Importiere dbProfile korrekt und behandle den ES-Modul Wrapper im CommonJS Kontext
-let dbProfile = require('hafas-client/p/db');
-if (dbProfile && dbProfile.profile) {
-  dbProfile = dbProfile.profile;
-}
+// Die Deutsche Bahn hat ihre alte HAFAS-API (reiseauskunft.bahn.de) abgeschaltet.
+// Wir nutzen db-rest (v6.db.transport.rest) – die gepflegte REST-Schnittstelle auf
+// Basis von db-vendo-client (DBs neue "vendo/movas"-API). Antworten sind FPTF-konform,
+// also genau die Form, die das Frontend erwartet (legs[], stopovers[], line.name, ...).
+const DB_REST_URL = process.env.DB_REST_URL || 'https://v6.db.transport.rest';
 
-// Ergänze locale falls fehlend
-if (!dbProfile.locale) {
-  dbProfile.locale = 'de-DE';
-}
+const http = axios.create({
+  baseURL: DB_REST_URL,
+  timeout: 13000,
+  headers: {
+    'User-Agent': 'zugalert-backend (github.com/ProLooover69/zugalert-server)',
+    Accept: 'application/json'
+  }
+});
 
 class HafasAPI {
-  constructor() {
-    try {
-      this.client = createClient(dbProfile, 'zugalert-backend');
-      console.log('✅ HAFAS Client initialisiert mit DB-Profil');
-    } catch (error) {
-      console.error('❌ HAFAS Client Initialisierungsfehler:', error.message);
-      this.client = null;
-    }
-
-    // Mock Stationen für schnelle Tests & Fallback
-    this.mockStations = {
-      'Hamburg': [
-        { id: '8002549', name: 'Hamburg Hbf', latitude: 53.552407, longitude: 10.006911 },
-        { id: '8002550', name: 'Hamburg-Harburg', latitude: 53.462222, longitude: 9.975278 },
-        { id: '8002557', name: 'Hamburg-Altona', latitude: 53.548333, longitude: 9.936111 }
-      ],
-      'Uelzen': [
-        { id: '8000152', name: 'Uelzen', latitude: 52.961944, longitude: 10.553056 }
-      ],
-      'Berlin': [
-        { id: '8011160', name: 'Berlin Hbf', latitude: 52.524611, longitude: 13.369722 }
-      ],
-      'Lüneburg': [
-        { id: '8000156', name: 'Lüneburg', latitude: 53.254167, longitude: 10.413889 }
-      ]
-    };
-  }
-
-  async getConnections(from, to, date = new Date()) {
-    try {
-      if (!this.client) {
-        throw new Error('HAFAS Client ist nicht initialisiert');
-      }
-
-      console.log(`🚂 Echter HAFAS Abruf: ${from} → ${to}`);
-      const res = await this.client.journeys(from, to, {
-        departure: date,
-        results: 3
-      });
-
-      if (!res || !res.journeys || res.journeys.length === 0) {
-        throw new Error('Keine Verbindungen von HAFAS zurückgegeben');
-      }
-
-      const connections = res.journeys.map((journey, idx) => {
-        const firstLeg = journey.legs[0];
-        const lastLeg = journey.legs[journey.legs.length - 1];
-
-        const departureTime = firstLeg.departure || firstLeg.plannedDeparture;
-        const arrivalTime = lastLeg.arrival || lastLeg.plannedArrival;
-
-        // Delay in Minuten
-        const delay = typeof firstLeg.departureDelay === 'number'
-          ? Math.round(firstLeg.departureDelay / 60)
-          : 0;
-
-        const cancelled = journey.legs.some(leg => leg.cancelled === true);
-        const lines = journey.legs
-          .map(leg => (leg.line ? leg.line.name : ''))
-          .filter(Boolean)
-          .join(' -> ');
-
-        return {
-          id: journey.refreshToken || String(idx + 1),
-          from: from,
-          to: to,
-          departure: departureTime,
-          arrival: arrivalTime,
-          delay: delay,
-          cancelled: cancelled,
-          line: lines || 'Zug',
-          platform: firstLeg.platform || firstLeg.plannedPlatform || '-'
-        };
-      });
-
-      console.log(`✅ Gefunden: ${connections.length} Verbindungen (HAFAS)`);
-      return connections;
-    } catch (error) {
-      console.warn(`⚠️ HAFAS Verbindungsabruf fehlgeschlagen (${error.message}). Nutze Mock-Fallbacks.`);
-      
-      const mockConnections = [
-        {
-          id: '1',
-          from: from,
-          to: to,
-          departure: new Date(date.getTime() + 30 * 60000).toISOString(),
-          arrival: new Date(date.getTime() + 90 * 60000).toISOString(),
-          delay: 0,
-          cancelled: false,
-          line: 'RE 3 (Mock)',
-          platform: '4'
-        },
-        {
-          id: '2',
-          from: from,
-          to: to,
-          departure: new Date(date.getTime() + 60 * 60000).toISOString(),
-          arrival: new Date(date.getTime() + 120 * 60000).toISOString(),
-          delay: 15,
-          cancelled: false,
-          line: 'RE 10 (Mock)',
-          platform: '2'
-        }
-      ];
-
-      return mockConnections;
-    }
-  }
-
+  // ── Stationssuche → Array von { id, name, latitude, longitude } ──
   async searchStation(query) {
-    try {
-      if (!this.client) {
-        throw new Error('HAFAS Client ist nicht initialisiert');
-      }
-
-      console.log(`🔍 Echte HAFAS Stationensuche: "${query}"`);
-      const results = await this.client.locations(query, { results: 10 });
-      
-      if (!results || results.length === 0) {
-        throw new Error('Keine Stationen von HAFAS gefunden');
-      }
-
-      const stations = results
-        .filter(item => item.type === 'stop' || item.type === 'station')
-        .map(item => ({
-          id: item.id,
-          name: item.name,
-          latitude: item.location ? item.location.latitude : undefined,
-          longitude: item.location ? item.location.longitude : undefined
-        }));
-
-      console.log(`✅ Gefunden: ${stations.length} Stationen (HAFAS)`);
-      return stations;
-    } catch (error) {
-      console.warn(`⚠️ HAFAS Stationensuche fehlgeschlagen (${error.message}). Nutze Mock-Fallbacks.`);
-
-      const results = [];
-      for (const [key, stations] of Object.entries(this.mockStations)) {
-        const matching = stations.filter(s =>
-          s.name.toLowerCase().includes(query.toLowerCase()) || s.id === query
-        );
-        results.push(...matching);
-      }
-
-      return results.length > 0 ? results : this.mockStations[query] || [];
-    }
+    console.log(`🔍 db-rest /locations: "${query}"`);
+    const { data } = await http.get('/locations', {
+      params: { query, results: 10, stops: true, addresses: false, poi: false, linesOfStops: false }
+    });
+    const list = Array.isArray(data) ? data : [];
+    return list
+      .filter(item => item.type === 'stop' || item.type === 'station')
+      .map(item => ({
+        id: item.id,
+        name: item.name,
+        latitude: item.location ? item.location.latitude : undefined,
+        longitude: item.location ? item.location.longitude : undefined
+      }));
   }
 
+  // ── Verbindungen → db-rest-Antwort { journeys: [...], ... } durchreichen (reiche legs) ──
+  async getConnections(from, to, date = new Date(), onlyRegional = false) {
+    const departure = (date instanceof Date ? date : new Date(date)).toISOString();
+    const params = { from, to, results: 5, stopovers: true, remarks: true, departure };
+    if (onlyRegional) {
+      params.nationalExpress = false; // ICE ausschließen
+      params.national = false;        // IC/EC ausschließen
+    }
+    console.log(`🚂 db-rest /journeys: ${from} → ${to}${onlyRegional ? ' (nur Regional)' : ''}`);
+    const { data } = await http.get('/journeys', { params });
+    return data; // { journeys: [...], earlierRef, laterRef, ... }
+  }
+
+  // ── Abfahrtstafel → Array (FPTF departures) ──
+  async getDepartures(stationId) {
+    console.log(`🕐 db-rest /departures: ${stationId}`);
+    const { data } = await http.get(`/stops/${encodeURIComponent(stationId)}/departures`, {
+      params: { duration: 120, results: 30, remarks: true }
+    });
+    return Array.isArray(data) ? data : (data.departures || []);
+  }
+
+  // ── Störungen → aus den Abfahrten abgeleitet (verspätet ≥5 Min oder ausgefallen) ──
   async getDisruptions(stationId) {
-    try {
-      if (!this.client) {
-        throw new Error('HAFAS Client ist nicht initialisiert');
-      }
-
-      console.log(`⚠️ Echte HAFAS Abfahrt-Störungssuche für Station: ${stationId}`);
-      const departures = await this.client.departures(stationId, {
-        duration: 60,
-        remarks: true
-      });
-
-      const disruptions = [];
-      departures.forEach((dep, idx) => {
+    const departures = await this.getDepartures(stationId);
+    return departures
+      .filter(dep => dep.cancelled === true || (typeof dep.delay === 'number' && dep.delay >= 300))
+      .map((dep, idx) => {
         const delayMinutes = typeof dep.delay === 'number' ? Math.round(dep.delay / 60) : 0;
-        const cancelled = dep.cancelled === true;
-
-        const warnings = dep.remarks
+        const remarks = Array.isArray(dep.remarks)
           ? dep.remarks.filter(r => r.type === 'warning' || r.type === 'status')
           : [];
-
-        const reason = warnings.map(w => w.text || w.summary).filter(Boolean).join(', ')
-          || (cancelled ? 'Zug fällt aus' : delayMinutes > 0 ? 'Verspätung' : '');
-
-        if (delayMinutes > 0 || cancelled || warnings.length > 0) {
-          disruptions.push({
-            id: dep.tripId || String(idx + 1),
-            line: dep.line ? dep.line.name : 'Zug',
-            direction: dep.direction || 'Unbekannt',
-            departure: dep.when || dep.plannedWhen,
-            delay: delayMinutes,
-            cancelled: cancelled,
-            reason: reason || 'Verspätung oder Störung gemeldet'
-          });
-        }
+        const reason = remarks.map(r => r.text || r.summary).filter(Boolean).join(', ')
+          || (dep.cancelled ? 'Zug fällt aus' : `Verspätung +${delayMinutes} Min`);
+        return {
+          id: dep.tripId || String(idx + 1),
+          line: dep.line ? dep.line.name : 'Zug',
+          direction: dep.direction || (dep.destination ? dep.destination.name : 'Unbekannt'),
+          departure: dep.when || dep.plannedWhen,
+          delay: delayMinutes,
+          cancelled: dep.cancelled === true,
+          reason
+        };
       });
-
-      console.log(`✅ Gefunden: ${disruptions.length} Störungen (HAFAS)`);
-      return disruptions;
-    } catch (error) {
-      console.warn(`⚠️ HAFAS Störungssuche fehlgeschlagen (${error.message}). Nutze Mock-Fallbacks.`);
-
-      const mockDisruptions = [
-        {
-          id: '1',
-          line: 'RE 3 (Mock)',
-          direction: 'Hamburg-Harburg',
-          departure: new Date().toISOString(),
-          delay: 25,
-          cancelled: false,
-          reason: 'Signalstörung bei Lüneburg'
-        },
-        {
-          id: '2',
-          line: 'RE 10 (Mock)',
-          direction: 'Uelzen',
-          departure: new Date(Date.now() + 3600000).toISOString(),
-          delay: 0,
-          cancelled: true,
-          reason: 'Personalmangel'
-        }
-      ];
-
-      return mockDisruptions;
-    }
   }
 }
 
