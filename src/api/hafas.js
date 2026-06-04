@@ -1,58 +1,101 @@
-// Die Deutsche Bahn hat ihre alte HAFAS-API (reiseauskunft.bahn.de) abgeschaltet.
-// Wir nutzen db-vendo-client – den gepflegten Nachfolger, der DBs neue "vendo/movas"-API
-// direkt anspricht (kein öffentlicher Proxy). Antworten sind FPTF-konform, also genau die
-// Form, die das Frontend erwartet (journeys[].legs[], stopovers[], line.name, delay in Sek.).
+const axios = require('axios');
 const { createClient } = require('db-vendo-client');
 
-// Profil per Env-Var wählbar. Default 'dbnav' (DB-Navigator-API) – das robusteste, das
-// auch die offiziellen db-vendo-client-Images nutzen. 'db' bezieht zusätzlich die
-// regio-guide-RIS-API ein, die von Cloud-IPs oft mit 403/Forbidden antwortet.
-const PROFILE = process.env.DB_PROFILE || 'dbnav';
+// Hintergrund: Die Deutsche Bahn hat ihre alte HAFAS-API abgeschaltet und blockt von
+// Cloud-IPs (wie Railway) gezielt die Journey-/Departure-Endpoints (403 Forbidden).
+// Die Stationssuche (autocomplete) ist hingegen offen.
+//
+// Strategie:
+//  • Suche  → direkt via db-vendo-client (Profil 'dbweb'), funktioniert von Railway aus.
+//  • Verbindungen/Abfahrten → über eine öffentliche db-rest-Instanz proxen (deren Server-IP
+//    ist nicht geblockt), mit Retry/Backoff gegen zeitweise 503er.
+
+// ── Direkt-Client für die Suche ──
+const PROFILE = process.env.DB_PROFILE || 'dbweb';
 let dbProfile = require(`db-vendo-client/p/${PROFILE}`);
 if (dbProfile && dbProfile.profile) dbProfile = dbProfile.profile;
-
-console.log(`🚉 HAFAS-Datenquelle: db-vendo-client (Profil '${PROFILE}')`);
+console.log(`🚉 Suche: db-vendo-client (Profil '${PROFILE}')`);
 const client = createClient(
   dbProfile,
   process.env.DB_USER_AGENT || 'zugalert-backend (github.com/ProLooover69/zugalert-server)'
 );
 
+// ── db-rest Proxy für Verbindungen/Abfahrten ──
+const DB_REST_URLS = (process.env.DB_REST_URLS || 'https://v6.db.transport.rest')
+  .split(',').map(s => s.trim()).filter(Boolean);
+console.log(`🌐 Verbindungen/Abfahrten via db-rest: ${DB_REST_URLS.join(', ')}`);
+
+const http = axios.create({
+  timeout: 13000,
+  headers: { 'User-Agent': 'zugalert-backend (github.com/ProLooover69/zugalert-server)', Accept: 'application/json' }
+});
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// Fragt db-rest ab; probiert Instanzen der Reihe nach und macht bei 5xx/429/Netzfehler Retries.
+async function dbRestGet(path, params) {
+  let lastErr;
+  for (const baseURL of DB_REST_URLS) {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const { data } = await http.get(baseURL + path, { params });
+        return data;
+      } catch (err) {
+        lastErr = err;
+        const status = err.response && err.response.status;
+        // Nicht-retrybare Client-Fehler (4xx außer 429) → nächste Instanz
+        if (status && status < 500 && status !== 429) break;
+        await sleep(500 * attempt); // 0.5s, 1s, 1.5s Backoff
+      }
+    }
+  }
+  const detail = lastErr && lastErr.response ? `HTTP ${lastErr.response.status}` : (lastErr ? lastErr.message : 'unbekannt');
+  throw new Error(`db-rest nicht erreichbar (${detail})`);
+}
+
+function mapStations(list) {
+  return (Array.isArray(list) ? list : [])
+    .filter(item => item.type === 'stop' || item.type === 'station')
+    .map(item => ({
+      id: item.id,
+      name: item.name,
+      latitude: item.location ? item.location.latitude : undefined,
+      longitude: item.location ? item.location.longitude : undefined
+    }));
+}
+
 class HafasAPI {
   // ── Stationssuche → Array von { id, name, latitude, longitude } ──
   async searchStation(query) {
-    console.log(`🔍 locations: "${query}"`);
-    const results = await client.locations(query, {
-      results: 10, stops: true, addresses: false, poi: false
-    });
-    const list = Array.isArray(results) ? results : [];
-    return list
-      .filter(item => item.type === 'stop' || item.type === 'station')
-      .map(item => ({
-        id: item.id,
-        name: item.name,
-        latitude: item.location ? item.location.latitude : undefined,
-        longitude: item.location ? item.location.longitude : undefined
-      }));
+    const opts = { results: 10, stops: true, addresses: false, poi: false };
+    try {
+      console.log(`🔍 locations (direkt): "${query}"`);
+      return mapStations(await client.locations(query, opts));
+    } catch (err) {
+      console.warn(`⚠️  Direkt-Suche fehlgeschlagen (${err.message}), Fallback db-rest`);
+      return mapStations(await dbRestGet('/locations', { query, ...opts }));
+    }
   }
 
-  // ── Verbindungen → FPTF-Antwort { journeys: [...], ... } durchreichen (reiche legs) ──
+  // ── Verbindungen → db-rest-Antwort { journeys: [...], ... } durchreichen (reiche legs) ──
   async getConnections(from, to, date = new Date(), onlyRegional = false) {
-    const departure = date instanceof Date ? date : new Date(date);
-    const opts = { results: 5, stopovers: true, remarks: true, departure };
+    const departure = (date instanceof Date ? date : new Date(date)).toISOString();
+    const params = { from, to, results: 5, stopovers: true, remarks: true, departure };
     if (onlyRegional) {
-      opts.nationalExpress = false; // ICE ausschließen
-      opts.national = false;        // IC/EC ausschließen
+      params.nationalExpress = false; // ICE ausschließen
+      params.national = false;        // IC/EC ausschließen
     }
-    console.log(`🚂 journeys: ${from} → ${to}${onlyRegional ? ' (nur Regional)' : ''}`);
-    const res = await client.journeys(from, to, opts);
-    return res; // { journeys: [...], earlierRef, laterRef, ... }
+    console.log(`🚂 journeys (db-rest): ${from} → ${to}${onlyRegional ? ' (nur Regional)' : ''}`);
+    return await dbRestGet('/journeys', params); // { journeys: [...], ... }
   }
 
   // ── Abfahrtstafel → Array (FPTF departures) ──
   async getDepartures(stationId) {
-    console.log(`🕐 departures: ${stationId}`);
-    const res = await client.departures(stationId, { duration: 120, results: 30, remarks: true });
-    return Array.isArray(res) ? res : (res.departures || []);
+    console.log(`🕐 departures (db-rest): ${stationId}`);
+    const data = await dbRestGet(`/stops/${encodeURIComponent(stationId)}/departures`, {
+      duration: 120, results: 30
+    });
+    return Array.isArray(data) ? data : (data.departures || []);
   }
 
   // ── Störungen → aus den Abfahrten abgeleitet (verspätet ≥5 Min oder ausgefallen) ──
