@@ -1,28 +1,25 @@
-const axios = require('axios');
-
 // Die Deutsche Bahn hat ihre alte HAFAS-API (reiseauskunft.bahn.de) abgeschaltet.
-// Wir nutzen db-rest (v6.db.transport.rest) – die gepflegte REST-Schnittstelle auf
-// Basis von db-vendo-client (DBs neue "vendo/movas"-API). Antworten sind FPTF-konform,
-// also genau die Form, die das Frontend erwartet (legs[], stopovers[], line.name, ...).
-const DB_REST_URL = process.env.DB_REST_URL || 'https://v6.db.transport.rest';
+// Wir nutzen db-vendo-client – den gepflegten Nachfolger, der DBs neue "vendo/movas"-API
+// direkt anspricht (kein öffentlicher Proxy). Antworten sind FPTF-konform, also genau die
+// Form, die das Frontend erwartet (journeys[].legs[], stopovers[], line.name, delay in Sek.).
+const { createClient } = require('db-vendo-client');
 
-const http = axios.create({
-  baseURL: DB_REST_URL,
-  timeout: 13000,
-  headers: {
-    'User-Agent': 'zugalert-backend (github.com/ProLooover69/zugalert-server)',
-    Accept: 'application/json'
-  }
-});
+let dbProfile = require('db-vendo-client/p/db');
+if (dbProfile && dbProfile.profile) dbProfile = dbProfile.profile;
+
+const client = createClient(
+  dbProfile,
+  process.env.DB_USER_AGENT || 'zugalert-backend (github.com/ProLooover69/zugalert-server)'
+);
 
 class HafasAPI {
   // ── Stationssuche → Array von { id, name, latitude, longitude } ──
   async searchStation(query) {
-    console.log(`🔍 db-rest /locations: "${query}"`);
-    const { data } = await http.get('/locations', {
-      params: { query, results: 10, stops: true, addresses: false, poi: false, linesOfStops: false }
+    console.log(`🔍 locations: "${query}"`);
+    const results = await client.locations(query, {
+      results: 10, stops: true, addresses: false, poi: false
     });
-    const list = Array.isArray(data) ? data : [];
+    const list = Array.isArray(results) ? results : [];
     return list
       .filter(item => item.type === 'stop' || item.type === 'station')
       .map(item => ({
@@ -33,26 +30,24 @@ class HafasAPI {
       }));
   }
 
-  // ── Verbindungen → db-rest-Antwort { journeys: [...], ... } durchreichen (reiche legs) ──
+  // ── Verbindungen → FPTF-Antwort { journeys: [...], ... } durchreichen (reiche legs) ──
   async getConnections(from, to, date = new Date(), onlyRegional = false) {
-    const departure = (date instanceof Date ? date : new Date(date)).toISOString();
-    const params = { from, to, results: 5, stopovers: true, remarks: true, departure };
+    const departure = date instanceof Date ? date : new Date(date);
+    const opts = { results: 5, stopovers: true, remarks: true, departure };
     if (onlyRegional) {
-      params.nationalExpress = false; // ICE ausschließen
-      params.national = false;        // IC/EC ausschließen
+      opts.nationalExpress = false; // ICE ausschließen
+      opts.national = false;        // IC/EC ausschließen
     }
-    console.log(`🚂 db-rest /journeys: ${from} → ${to}${onlyRegional ? ' (nur Regional)' : ''}`);
-    const { data } = await http.get('/journeys', { params });
-    return data; // { journeys: [...], earlierRef, laterRef, ... }
+    console.log(`🚂 journeys: ${from} → ${to}${onlyRegional ? ' (nur Regional)' : ''}`);
+    const res = await client.journeys(from, to, opts);
+    return res; // { journeys: [...], earlierRef, laterRef, ... }
   }
 
   // ── Abfahrtstafel → Array (FPTF departures) ──
   async getDepartures(stationId) {
-    console.log(`🕐 db-rest /departures: ${stationId}`);
-    const { data } = await http.get(`/stops/${encodeURIComponent(stationId)}/departures`, {
-      params: { duration: 120, results: 30, remarks: true }
-    });
-    return Array.isArray(data) ? data : (data.departures || []);
+    console.log(`🕐 departures: ${stationId}`);
+    const res = await client.departures(stationId, { duration: 120, results: 30, remarks: true });
+    return Array.isArray(res) ? res : (res.departures || []);
   }
 
   // ── Störungen → aus den Abfahrten abgeleitet (verspätet ≥5 Min oder ausgefallen) ──
