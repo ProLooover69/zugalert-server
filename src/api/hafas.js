@@ -24,6 +24,8 @@ function loadProfile(name) {
   }
 }
 
+const USER_AGENT = process.env.DB_USER_AGENT || 'zugalert-backend (github.com/ProLooover69/zugalert-server)';
+
 let _clientPromise = null;
 function getClient() {
   if (!_clientPromise) {
@@ -33,13 +35,29 @@ function getClient() {
       const mod = await loadProfile(PROFILE);
       const dbProfile = mod.profile || (mod.default && mod.default.profile) || mod.default || mod;
       console.log(`🚉 db-vendo-client bereit (Profil '${PROFILE}')`);
-      return createClient(
-        dbProfile,
-        process.env.DB_USER_AGENT || 'zugalert-backend (github.com/ProLooover69/zugalert-server)'
-      );
+      return createClient(dbProfile, USER_AGENT);
     })().catch(err => { _clientPromise = null; throw err; }); // bei Fehler nächster Aufruf erneut
   }
   return _clientPromise;
+}
+
+// ── Key-Client (dbris → RIS::Boards) NUR für Abfahrten/Ankünfte ──
+// Authentifiziert per DB_CLIENT_ID/DB_API_KEY (Quota statt IP-Block) → funktioniert von Cloud-IPs.
+// Nur aktiv, wenn beide Credentials gesetzt sind. journeys/locations kann dieses Profil NICHT.
+let _boardClientPromise = null;
+function getBoardClient() {
+  if (!process.env.DB_CLIENT_ID || !process.env.DB_API_KEY) return null; // kein Key → kein dbris
+  if (!_boardClientPromise) {
+    _boardClientPromise = (async () => {
+      const vendo = await import('db-vendo-client');
+      const createClient = vendo.createClient || (vendo.default && vendo.default.createClient);
+      const mod = await import('db-vendo-client/p/dbris/index.js');
+      const dbris = mod.profile || (mod.default && mod.default.profile) || mod.default || mod;
+      console.log('🚉 dbris (RIS::Boards, Key) bereit – für Abfahrten/Störungen');
+      return createClient(dbris, USER_AGENT);
+    })().catch(err => { _boardClientPromise = null; throw err; });
+  }
+  return _boardClientPromise;
 }
 
 // ── db-rest Proxy für Verbindungen/Abfahrten ──
@@ -126,18 +144,33 @@ class HafasAPI {
   }
 
   // ── Abfahrtstafel → Array (FPTF departures) ──
-  // Erst direkt via db-vendo-client, Fallback db-rest-Proxy.
+  // 3-stufig: 1) dbris/Key (cloud-tauglich) → 2) db-vendo-client direkt (Wohn-IP) → 3) db-rest-Proxy.
   async getDepartures(stationId) {
+    const opts = { duration: 120, results: 30 };
+
+    // 1) dbris (RIS::Boards, Key) – funktioniert von Cloud-IPs
+    const boardClientP = getBoardClient();
+    if (boardClientP) {
+      try {
+        const client = await boardClientP;
+        console.log(`🕐 departures (dbris/Key): ${stationId}`);
+        const res = await client.departures(stationId, opts);
+        return Array.isArray(res) ? res : (res.departures || []);
+      } catch (err) {
+        console.warn(`⚠️  dbris-departures fehlgeschlagen (${err.message}), nächste Stufe`);
+      }
+    }
+
+    // 2) db-vendo-client direkt (dbweb) – geht von Nicht-Cloud-IPs
     try {
       const client = await getClient();
       console.log(`🕐 departures (direkt): ${stationId}`);
-      const res = await client.departures(stationId, { duration: 120, results: 30 });
+      const res = await client.departures(stationId, opts);
       return Array.isArray(res) ? res : (res.departures || []);
     } catch (err) {
       console.warn(`⚠️  Direkt-departures fehlgeschlagen (${err.message}), Fallback db-rest`);
-      const data = await dbRestGet(`/stops/${encodeURIComponent(stationId)}/departures`, {
-        duration: 120, results: 30
-      });
+      // 3) db-rest-Proxy
+      const data = await dbRestGet(`/stops/${encodeURIComponent(stationId)}/departures`, opts);
       return Array.isArray(data) ? data : (data.departures || []);
     }
   }

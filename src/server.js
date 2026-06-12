@@ -31,6 +31,9 @@ app.get('/health', (req, res) => {
     service: 'zugalert-train-data',
     sources: {
       search: `db-vendo-client (Profil '${process.env.DB_PROFILE || 'dbweb'}')`,
+      departures: (process.env.DB_CLIENT_ID && process.env.DB_API_KEY)
+        ? 'dbris (RIS::Boards, Key gesetzt)'
+        : 'dbweb/db-rest (kein DB-Key)',
       journeys: (process.env.DB_REST_URLS || 'https://v6.db.transport.rest')
     },
     timestamp: new Date()
