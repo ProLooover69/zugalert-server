@@ -11,8 +11,15 @@ const { createClient } = require('db-vendo-client');
 //    ist nicht geblockt), mit Retry/Backoff gegen zeitweise 503er.
 
 // ── Direkt-Client für die Suche ──
+// Profile STATISCH laden – ein dynamisches require(`.../p/${x}`) kann der Vercel-Bundler
+// (statische Analyse) nicht auflösen → die Function crasht zur Laufzeit (FUNCTION_INVOCATION_FAILED).
+const PROFILES = {
+  dbweb: require('db-vendo-client/p/dbweb'),
+  dbnav: require('db-vendo-client/p/dbnav'),
+  db: require('db-vendo-client/p/db'),
+};
 const PROFILE = process.env.DB_PROFILE || 'dbweb';
-let dbProfile = require(`db-vendo-client/p/${PROFILE}`);
+let dbProfile = PROFILES[PROFILE] || PROFILES.dbweb;
 if (dbProfile && dbProfile.profile) dbProfile = dbProfile.profile;
 console.log(`🚉 Suche: db-vendo-client (Profil '${PROFILE}')`);
 const client = createClient(
