@@ -1,60 +1,50 @@
 # Deployment – ZugAlert (0 €)
 
-Architektur: **Backend** (Bahn-Daten-Proxy, Express) auf **Render** · **Frontend** (React/Vite) auf **Vercel**.
+**Gewählt:** alles auf **Vercel** in **einem** Projekt – Frontend statisch + Backend als
+Serverless-Function. Gleiche Domain → `/api` relativ, kein CORS, keine zweite URL.
 Nutzer/Accounts laufen später über Firebase (noch nicht verdrahtet).
 
 ```
-Browser ──► Vercel (client/dist, statisch)
-                │  fetch VITE_API_URL
-                ▼
-        Render (Express: /api/trains/*, /api/disruptions/*, /health)
-                │ db-vendo-client direkt  (Fallback: db-rest)
-                ▼
-          Deutsche Bahn / transport.rest
+Browser ──► Vercel  (ein Projekt)
+              ├─ /            client/dist  (statisch)
+              └─ /api/*,/health  api/index.js → src/server.js  (Serverless)
+                                     │ db-vendo-client direkt (Fallback db-rest)
+                                     ▼
+                               Deutsche Bahn / transport.rest
 ```
 
----
+Relevante Dateien:
+- `vercel.json` – baut `client/` statisch **und** `api/index.js` als Node-Function; routet `/api/*` + `/health` dorthin.
+- `api/index.js` – exportiert die Express-App aus `src/server.js` (kein `listen` dank Guard).
+- Frontend nutzt `VITE_API_URL || '/api'` → **ohne** gesetzte Env-Var automatisch same-origin `/api`.
 
-## 1. Backend → Render (free)
+## Deploy
 
-1. [render.com](https://render.com) → mit GitHub einloggen.
-2. **New +** → **Blueprint** → Repo `ProLooover69/zugalert-server` wählen. Render liest `render.yaml`
-   (Web Service `zugalert-backend`, Build `npm install`, Start `npm start`, Healthcheck `/health`, Plan free).
-   - Alternativ manuell: **New + → Web Service**, Root = Repo-Wurzel, Build `npm install`, Start `npm start`.
-3. Deploy abwarten → URL notieren, z. B. `https://zugalert-backend.onrender.com`.
-4. **Testen** (wichtig wegen Cloud-IP-403, siehe unten):
-   ```bash
-   curl https://zugalert-backend.onrender.com/health
-   curl "https://zugalert-backend.onrender.com/api/trains/search?query=Hamburg"      # geht von Cloud-IPs immer
-   curl "https://zugalert-backend.onrender.com/api/trains/departures?station=8002549" # 403-Test
-   ```
-   - `departures`/`connections` `success` → super, `db-vendo-client` direkt geht auch vom Render-Host.
-   - `502 db-rest nicht erreichbar` → die Bahn blockt die Render-IP für journeys/departures (403),
-     es greift nur der db-rest-Fallback. Dann mehrere `DB_REST_URLS` als Fallback setzen (siehe `render.yaml`).
+Über die Vercel-Integration (von Claude gesteuert) oder manuell:
+1. [vercel.com](https://vercel.com) → **Add New… → Project** → Repo `ProLooover69/zugalert-server`.
+2. **Root Directory = Repo-Wurzel** (nicht `client/`), `vercel.json` übernimmt den Rest.
+3. **Wichtig – Environment Variables:** `VITE_API_URL` **leer lassen / nicht setzen**
+   (sonst zeigt das Frontend nicht auf die mitdeployte Function). Falls eine alte
+   `VITE_API_URL` (z. B. Railway) im Projekt steht → **entfernen**.
+4. Deploy → URL z. B. `https://zugalert.vercel.app`.
 
-> **Hinweis Free-Plan:** Der Dienst schläft nach ~15 Min Inaktivität → der erste Aufruf danach dauert ~50 s.
-> Das Frontend zeigt solange seinen Ladespinner.
-
-## 2. Frontend → Vercel (free)
-
-1. [vercel.com](https://vercel.com) → mit GitHub einloggen → **Add New… → Project** → dasselbe Repo.
-2. **Root Directory** auf **`client`** setzen (wichtig – sonst baut Vercel das Backend).
-   Framework wird als **Vite** erkannt (Build `npm run build`, Output `dist`).
-3. **Environment Variables**:
-   - `VITE_API_URL` = `https://zugalert-backend.onrender.com/api`  (deine Render-URL + `/api`)
-   - die `VITE_FIREBASE_*`-Werte aus `client/.env` (für später; schaden jetzt nicht).
-4. **Deploy** → URL z. B. `https://zugalert.vercel.app`.
-
-## 3. Feinschliff (optional)
-
-- **CORS einschränken:** in Render `CORS_ORIGIN=https://zugalert.vercel.app` setzen (Standard ist offen – für
-  öffentliche Read-only-Daten ok).
-- **Custom Domain:** in Vercel unter *Settings → Domains*.
-
----
+### Nach dem Deploy testen
+```bash
+curl https://<deine-app>.vercel.app/health
+curl "https://<deine-app>.vercel.app/api/trains/search?query=Hamburg"       # geht von Cloud-IPs immer
+curl "https://<deine-app>.vercel.app/api/trains/departures?station=8002549"  # 403-Test (siehe unten)
+```
 
 ## Bekannte offene Punkte
+- **Cloud-IP-403:** `journeys`/`departures` gehen lokal direkt über `db-vendo-client`. Vom Vercel-Host
+  (Cloud-IP) kann die Bahn das mit 403 blocken → dann greift der db-rest-Fallback (zeitweise 503).
+  Der Test in Schritt „Nach dem Deploy" zeigt, was zutrifft. Search geht von Cloud-IPs ohnehin.
+- **Community-Chat** ruft `/api/chat` – Endpoint existiert nicht (Backend ist auth-/chat-frei). Kommt mit Firebase.
 
-- **Community-Chat** ruft `/api/chat` – dieser Endpoint existiert nicht (Backend ist auth-/chat-frei).
-  Kommt mit der Firebase-Stufe (Firestore-Realtime).
-- **Cloud-IP-403:** journeys/departures gehen lokal direkt; ob das auch vom Render-Host geht, zeigt der Test in Schritt 1.4.
+---
+
+## Alternative: Backend auf Render (statt Serverless)
+
+Falls der Cloud-IP-403 zuschlägt und du eine andere Host-IP testen willst: `render.yaml` liegt bei.
+Render (free) als Web-Service, Frontend separat auf Vercel mit `VITE_API_URL=https://<app>.onrender.com/api`.
+Nachteil: 2 Dienste, CORS-Setup, Cold-Start (~50 s) nach Inaktivität.
