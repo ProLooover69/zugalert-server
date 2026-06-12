@@ -3,36 +3,38 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
-const connectDB = require('./db');
-
-// Connect to Database
-connectDB();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
 // Middleware
 app.use(helmet());
-app.use(cors());
+// CORS: standardmäßig offen (öffentliche, read-only Bahn-Daten – keine Cookies/kein Auth).
+// Optional via CORS_ORIGIN (kommagetrennt) einschränken, z. B. auf die Vercel-Domain.
+const corsOrigin = process.env.CORS_ORIGIN
+  ? process.env.CORS_ORIGIN.split(',').map(s => s.trim())
+  : true;
+app.use(cors({ origin: corsOrigin }));
 app.use(express.json());
 
 // Services
+// Reiner Bahn-Daten-Proxy: keine DB, kein Auth. Nutzer/Accounts laufen über Firebase im Frontend.
 const hafas = require('./api/hafas.js');
 const cache = require('./services/cache.js');
-const authRouter = require('./routes/auth.js');
-const userRouter = require('./routes/users.js');
 
 // ============ ROUTES ============
 
-// Auth Routes
-app.use('/api/auth', authRouter);
-
-// User Routes
-app.use('/api/users', userRouter);
-
 // Health Check
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date() });
+  res.json({
+    status: 'ok',
+    service: 'zugalert-train-data',
+    sources: {
+      search: `db-vendo-client (Profil '${process.env.DB_PROFILE || 'dbweb'}')`,
+      journeys: (process.env.DB_REST_URLS || 'https://v6.db.transport.rest')
+    },
+    timestamp: new Date()
+  });
 });
 
 // Bahnhof suchen → { status, count, stations }
@@ -157,9 +159,12 @@ app.use((err, req, res, next) => {
 });
 
 // ============ START SERVER ============
-app.listen(PORT, () => {
-  console.log(`
-🚂 ZugAlert Server läuft! (Datenquelle: db-rest / ${process.env.DB_REST_URL || 'v6.db.transport.rest'})
+// Nur lauschen, wenn direkt gestartet (lokal / Render via `npm start`).
+// Als importiertes Modul (Tests / evtl. Serverless) wird nur die App exportiert.
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`
+🚂 ZugAlert Bahn-Daten-Proxy läuft! (Suche: db-vendo-client · Verbindungen/Abfahrten: db-rest ${process.env.DB_REST_URLS || 'v6.db.transport.rest'})
 📍 http://localhost:${PORT}
 ✅ Health:       http://localhost:${PORT}/health
 📍 Stationen:    http://localhost:${PORT}/api/trains/search?query=Hamburg
@@ -167,6 +172,7 @@ app.listen(PORT, () => {
 🕐 Abfahrten:    http://localhost:${PORT}/api/trains/departures?station=8002549
 ⚠️  Störungen:    http://localhost:${PORT}/api/disruptions/8002549
   `);
-});
+  });
+}
 
 module.exports = app;

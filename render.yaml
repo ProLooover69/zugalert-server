@@ -1,0 +1,23 @@
+# Render Blueprint – Backend (Bahn-Daten-Proxy)
+# In Render: "New +" → "Blueprint" → dieses Repo wählen. Render liest diese Datei.
+# Free-Plan: schläft nach ~15 Min Inaktivität → erster Aufruf danach ~50 s Cold-Start.
+services:
+  - type: web
+    name: zugalert-backend
+    runtime: node
+    plan: free
+    region: frankfurt
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      # Optional: CORS auf die Vercel-Domain einschränken (sonst offen, was für
+      # öffentliche Read-only-Daten ok ist). Beispiel:
+      # - key: CORS_ORIGIN
+      #   value: https://zugalert.vercel.app
+      # Optional: weitere db-rest-Fallback-Instanzen, kommagetrennt:
+      # - key: DB_REST_URLS
+      #   value: https://v6.db.transport.rest,https://v5.db.transport.rest

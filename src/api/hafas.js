@@ -77,25 +77,44 @@ class HafasAPI {
     }
   }
 
-  // ── Verbindungen → db-rest-Antwort { journeys: [...], ... } durchreichen (reiche legs) ──
+  // ── Verbindungen → { journeys: [...], ... } mit reichen legs ──
+  // Erst direkt via db-vendo-client (funktioniert von Nicht-Cloud-IPs), Fallback db-rest-Proxy.
   async getConnections(from, to, date = new Date(), onlyRegional = false) {
     const departure = (date instanceof Date ? date : new Date(date)).toISOString();
-    const params = { from, to, results: 5, stopovers: true, remarks: true, departure };
-    if (onlyRegional) {
-      params.nationalExpress = false; // ICE ausschließen
-      params.national = false;        // IC/EC ausschließen
+    try {
+      const opts = { results: 5, stopovers: true, remarks: true, departure };
+      if (onlyRegional) opts.products = { nationalExpress: false, national: false }; // ICE/IC/EC ausschließen
+      console.log(`🚂 journeys (direkt): ${from} → ${to}${onlyRegional ? ' (nur Regional)' : ''}`);
+      const res = await client.journeys(from, to, opts);
+      let journeys = res.journeys || [];
+      if (onlyRegional) {
+        // Backstop, falls das Profil den products-Filter ignoriert
+        journeys = journeys.filter(j => !(j.legs || []).some(l =>
+          l.line && (l.line.product === 'nationalExpress' || l.line.product === 'national')));
+      }
+      return { ...res, journeys };
+    } catch (err) {
+      console.warn(`⚠️  Direkt-journeys fehlgeschlagen (${err.message}), Fallback db-rest`);
+      const params = { from, to, results: 5, stopovers: true, remarks: true, departure };
+      if (onlyRegional) { params.nationalExpress = false; params.national = false; }
+      return await dbRestGet('/journeys', params); // { journeys: [...], ... }
     }
-    console.log(`🚂 journeys (db-rest): ${from} → ${to}${onlyRegional ? ' (nur Regional)' : ''}`);
-    return await dbRestGet('/journeys', params); // { journeys: [...], ... }
   }
 
   // ── Abfahrtstafel → Array (FPTF departures) ──
+  // Erst direkt via db-vendo-client, Fallback db-rest-Proxy.
   async getDepartures(stationId) {
-    console.log(`🕐 departures (db-rest): ${stationId}`);
-    const data = await dbRestGet(`/stops/${encodeURIComponent(stationId)}/departures`, {
-      duration: 120, results: 30
-    });
-    return Array.isArray(data) ? data : (data.departures || []);
+    try {
+      console.log(`🕐 departures (direkt): ${stationId}`);
+      const res = await client.departures(stationId, { duration: 120, results: 30 });
+      return Array.isArray(res) ? res : (res.departures || []);
+    } catch (err) {
+      console.warn(`⚠️  Direkt-departures fehlgeschlagen (${err.message}), Fallback db-rest`);
+      const data = await dbRestGet(`/stops/${encodeURIComponent(stationId)}/departures`, {
+        duration: 120, results: 30
+      });
+      return Array.isArray(data) ? data : (data.departures || []);
+    }
   }
 
   // ── Störungen → aus den Abfahrten abgeleitet (verspätet ≥5 Min oder ausgefallen) ──

@@ -1,2 +1,22 @@
+# Dependencies
 node_modules/
+client/node_modules/
+
+# Build-Artefakte
+client/dist/
+dist/
+
+# Environment / Secrets (NIE committen!)
 .env
+.env.*
+!.env.example
+client/.env
+client/.env.*
+!client/.env.example
+
+# Streunende/Backup-Env-Dateien aus früheren Versuchen
+*.env
+" .env"
+
+# Logs
+*.log

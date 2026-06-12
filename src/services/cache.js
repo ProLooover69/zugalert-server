@@ -1,21 +1,9 @@
-const redis = require('redis');
-
+// In-Memory-Cache (Map mit TTL). Bewusst kein Redis: der Proxy ist zustandslos genug,
+// und der Free-Tier-Betrieb soll ohne zusätzlichen Dienst auskommen.
 class CacheService {
   constructor() {
-    this.client = null;
-    this.isConnected = false;
-  }
-
-  async connect() {
-    try {
-      // Für Development: Redis optional
-      // In Production würde echtes Redis laufen
-      console.log('🔌 Cache Service initialized (Mock Mode)');
-      this.isConnected = true;
-    } catch (error) {
-      console.warn('⚠️  Redis nicht verfügbar, nutze In-Memory Cache');
-      this.cache = new Map();
-    }
+    this.cache = new Map();
+    this.timers = new Map(); // key -> Timeout, damit wir beim Überschreiben aufräumen können
   }
 
   async get(key) {
@@ -37,17 +25,20 @@ class CacheService {
 
   async set(key, value, ttl = 300) {
     try {
-      if (!this.cache) this.cache = new Map();
-      
       console.log(`💾 Cache SET: ${key} (TTL: ${ttl}s)`);
       this.cache.set(key, JSON.stringify(value));
-      
-      // Auto-delete nach TTL (Time To Live)
-      setTimeout(() => {
+
+      // Vorherigen Ablauf-Timer dieses Keys löschen, sonst würde er den frischen Wert killen.
+      if (this.timers.has(key)) clearTimeout(this.timers.get(key));
+
+      const timer = setTimeout(() => {
         this.cache.delete(key);
+        this.timers.delete(key);
         console.log(`🗑️  Cache EXPIRED: ${key}`);
       }, ttl * 1000);
-      
+      if (typeof timer.unref === 'function') timer.unref(); // Cache soll den Prozess nicht am Leben halten
+      this.timers.set(key, timer);
+
       return true;
     } catch (error) {
       console.error('Cache SET Error:', error.message);
@@ -57,8 +48,7 @@ class CacheService {
 
   async del(key) {
     try {
-      if (!this.cache) this.cache = new Map();
-      
+      if (this.timers.has(key)) { clearTimeout(this.timers.get(key)); this.timers.delete(key); }
       const deleted = this.cache.delete(key);
       console.log(`❌ Cache DELETE: ${key}`);
       return deleted;
@@ -70,7 +60,8 @@ class CacheService {
 
   async clear() {
     try {
-      if (!this.cache) this.cache = new Map();
+      for (const timer of this.timers.values()) clearTimeout(timer);
+      this.timers.clear();
       this.cache.clear();
       console.log('🗑️  Cache CLEARED');
       return true;
