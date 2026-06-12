@@ -1,31 +1,46 @@
 const axios = require('axios');
-const { createClient } = require('db-vendo-client');
 
 // Hintergrund: Die Deutsche Bahn hat ihre alte HAFAS-API abgeschaltet und blockt von
 // Cloud-IPs (wie Railway) gezielt die Journey-/Departure-Endpoints (403 Forbidden).
 // Die Stationssuche (autocomplete) ist hingegen offen.
 //
 // Strategie:
-//  • Suche  → direkt via db-vendo-client (Profil 'dbweb'), funktioniert von Railway aus.
-//  • Verbindungen/Abfahrten → über eine öffentliche db-rest-Instanz proxen (deren Server-IP
-//    ist nicht geblockt), mit Retry/Backoff gegen zeitweise 503er.
+//  • Suche/Verbindungen/Abfahrten → erst direkt via db-vendo-client, Fallback db-rest-Proxy.
 
-// ── Direkt-Client für die Suche ──
-// Profile STATISCH laden – ein dynamisches require(`.../p/${x}`) kann der Vercel-Bundler
-// (statische Analyse) nicht auflösen → die Function crasht zur Laufzeit (FUNCTION_INVOCATION_FAILED).
-const PROFILES = {
-  dbweb: require('db-vendo-client/p/dbweb'),
-  dbnav: require('db-vendo-client/p/dbnav'),
-  db: require('db-vendo-client/p/db'),
-};
+// ── Direkt-Client (db-vendo-client) – LAZY via dynamic import() ──
+// db-vendo-client ist ein ESM-Paket. Ein `require()` davon crasht in Vercels gebündelter
+// Function (ERR_REQUIRE_ESM). Daher wird es per dynamischem import() geladen und der Client
+// gecacht. Profile mit STATISCHEN import()-Specifiern, damit der Bundler sie mitnimmt.
 const PROFILE = process.env.DB_PROFILE || 'dbweb';
-let dbProfile = PROFILES[PROFILE] || PROFILES.dbweb;
-if (dbProfile && dbProfile.profile) dbProfile = dbProfile.profile;
-console.log(`🚉 Suche: db-vendo-client (Profil '${PROFILE}')`);
-const client = createClient(
-  dbProfile,
-  process.env.DB_USER_AGENT || 'zugalert-backend (github.com/ProLooover69/zugalert-server)'
-);
+
+function loadProfile(name) {
+  // Expliziter /index.js-Pfad: db-vendo-client ist ESM ohne exports-Map → Verzeichnis-Import
+  // wird nicht unterstützt, der volle Dateipfad schon.
+  switch (name) {
+    case 'dbnav': return import('db-vendo-client/p/dbnav/index.js');
+    case 'db': return import('db-vendo-client/p/db/index.js');
+    case 'dbweb':
+    default: return import('db-vendo-client/p/dbweb/index.js');
+  }
+}
+
+let _clientPromise = null;
+function getClient() {
+  if (!_clientPromise) {
+    _clientPromise = (async () => {
+      const vendo = await import('db-vendo-client');
+      const createClient = vendo.createClient || (vendo.default && vendo.default.createClient);
+      const mod = await loadProfile(PROFILE);
+      const dbProfile = mod.profile || (mod.default && mod.default.profile) || mod.default || mod;
+      console.log(`🚉 db-vendo-client bereit (Profil '${PROFILE}')`);
+      return createClient(
+        dbProfile,
+        process.env.DB_USER_AGENT || 'zugalert-backend (github.com/ProLooover69/zugalert-server)'
+      );
+    })().catch(err => { _clientPromise = null; throw err; }); // bei Fehler nächster Aufruf erneut
+  }
+  return _clientPromise;
+}
 
 // ── db-rest Proxy für Verbindungen/Abfahrten ──
 const DB_REST_URLS = (process.env.DB_REST_URLS || 'https://v6.db.transport.rest')
@@ -76,6 +91,7 @@ class HafasAPI {
   async searchStation(query) {
     const opts = { results: 10, stops: true, addresses: false, poi: false };
     try {
+      const client = await getClient();
       console.log(`🔍 locations (direkt): "${query}"`);
       return mapStations(await client.locations(query, opts));
     } catch (err) {
@@ -89,6 +105,7 @@ class HafasAPI {
   async getConnections(from, to, date = new Date(), onlyRegional = false) {
     const departure = (date instanceof Date ? date : new Date(date)).toISOString();
     try {
+      const client = await getClient();
       const opts = { results: 5, stopovers: true, remarks: true, departure };
       if (onlyRegional) opts.products = { nationalExpress: false, national: false }; // ICE/IC/EC ausschließen
       console.log(`🚂 journeys (direkt): ${from} → ${to}${onlyRegional ? ' (nur Regional)' : ''}`);
@@ -112,6 +129,7 @@ class HafasAPI {
   // Erst direkt via db-vendo-client, Fallback db-rest-Proxy.
   async getDepartures(stationId) {
     try {
+      const client = await getClient();
       console.log(`🕐 departures (direkt): ${stationId}`);
       const res = await client.departures(stationId, { duration: 120, results: 30 });
       return Array.isArray(res) ? res : (res.departures || []);
